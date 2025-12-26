@@ -862,10 +862,132 @@ def main():
     print(f"  Step 4: Optimize Threshold trên 2023-2024 (Validation)")
     print(f"  Step 5: Test trên 2025 (Test Period) - OUT-OF-SAMPLE thực sự")
 
-    # Init predictor
+    # Init predictor (chi de lay sequence_length va horizon)
     predictor = NVDA_MultiStock_Complete(sequence_length=args.seq_len, horizon=args.horizon)
-    df, all_features = predictor.load_multi_stock_data(args.data_dir)
-
+    
+    # ==================== Load data va them features TRUC TIEP trong v7.1 ====================
+    import glob
+    stocks = ['NVDA', 'AMD', 'MU', 'INTC', 'QCOM']
+    all_dfs = []
+    all_feature_cols = set()
+    stock_quantiles = {}
+    
+    print(f"Loading data from {len(stocks)} stocks...")
+    
+    # Tim file trong data/Feature/ truoc, neu khong co thi tim trong data/
+    feature_dir = os.path.join(args.data_dir, 'Feature')
+    search_dirs = [feature_dir, args.data_dir] if os.path.exists(feature_dir) else [args.data_dir]
+    
+    for stock in stocks:
+        csv_file = None
+        
+        # Tim file voi pattern {stock}_dss_features_*.csv
+        for search_dir in search_dirs:
+            pattern = os.path.join(search_dir, f"{stock}_dss_features_*.csv")
+            matches = glob.glob(pattern)
+            if matches:
+                # Lay file moi nhat neu co nhieu file
+                csv_file = max(matches, key=os.path.getmtime)
+                break
+        
+        if csv_file is None or not os.path.exists(csv_file):
+            print(f"Warning: {stock}_dss_features_*.csv not found in {search_dirs}, skipping {stock}")
+            continue
+        
+        # Load CSV file
+        df = pd.read_csv(csv_file)
+        
+        if "Date" in df.columns:
+            df["Date"] = pd.to_datetime(df["Date"])
+            df = df.sort_values("Date").reset_index(drop=True)
+        
+        # ==================== Them 5 One-Hot Encoding Features ====================
+        for s in stocks:
+            df[f'stock_{s}'] = 1 if s == stock else 0
+        
+        # Create future return target
+        adj = df["Adj Close"].astype(float)
+        df["future_return"] = (adj.shift(-args.horizon) / adj) - 1.0
+        
+        # ==================== Them 5 Sector Features ====================
+        # Simulate SOX index data
+        np.random.seed(42)
+        df['sox_return'] = np.random.normal(0.001, 0.02, len(df))
+        
+        # Calculate rolling beta to SOX
+        window = 20
+        df['stock_vs_sox'] = df['daily_return'] - df['sox_return']
+        
+        # Rolling correlation
+        df['rolling_corr_sox'] = df['daily_return'].rolling(window).corr(df['sox_return'])
+        
+        # Rolling beta
+        cov_stock_sox = df['daily_return'].rolling(window).cov(df['sox_return'])
+        var_sox = df['sox_return'].rolling(window).var()
+        df['beta_to_sox'] = cov_stock_sox / var_sox
+        
+        # Sector momentum indicator
+        df['sector_momentum'] = df['sox_return'].rolling(5).mean()
+        
+        # Calculate per-stock quantiles for labels
+        r = df["future_return"].values
+        r_clean = r[~np.isnan(r)]
+        
+        q_low = np.quantile(r_clean, 0.30)
+        q_high = np.quantile(r_clean, 0.70)
+        
+        # Store quantiles for this stock
+        stock_quantiles[stock] = {'low': q_low, 'high': q_high}
+        
+        print(f"{stock} quantiles - Low: {q_low:.4f}, High: {q_high:.4f}")
+        
+        # Create labels using per-stock quantiles
+        y_cls = np.where(df["future_return"] >= q_high, 2, 
+                        np.where(df["future_return"] <= q_low, 0, 1))
+        df["signal_label"] = y_cls.astype(np.int64)
+        
+        # Drop NaN rows
+        df = df.dropna().reset_index(drop=True)
+        
+        # Select ONLY relative features (NO absolute prices!)
+        exclude_cols = [
+            "Date", "Index", "Adj Close", "Close", "Open", "High", "Low",
+            "daily_return", "price_change", "future_return", "signal_label"
+        ]
+        
+        # Check which columns exist and select features
+        feature_cols = [c for c in df.columns if c not in exclude_cols]
+        
+        # Ensure no absolute price features (chi loai bo cac columns chinh xac la price columns)
+        absolute_price_cols = ['close', 'open', 'high', 'low']
+        feature_cols = [c for c in feature_cols if c.lower() not in absolute_price_cols]
+        
+        print(f"  OK {stock}: {len(df)} rows, {len(feature_cols)} features (from {os.path.basename(csv_file)})")
+        all_dfs.append(df)
+        all_feature_cols.update(feature_cols)
+    
+    if not all_dfs:
+        raise ValueError("No stock data files found!")
+    
+    # Ensure all DataFrames have the same columns
+    for i, df in enumerate(all_dfs):
+        for col in all_feature_cols:
+            if col not in df.columns:
+                df[col] = 0  # Fill missing features with 0
+    
+    # Combine all data
+    df = pd.concat(all_dfs, ignore_index=True)
+    
+    # Convert to float32 (except labels)
+    label_cols = ['signal_label']
+    numeric_cols = [col for col in df.select_dtypes(include=[np.number]).columns 
+                   if col not in label_cols]
+    df[numeric_cols] = df[numeric_cols].astype(np.float32)
+    
+    print(f"\nCombined dataset:")
+    print(f"  Total rows: {len(df)}")
+    print(f"  Features: {len(all_feature_cols)}")
+    
     # Kiem tra date range thuc te cua dataset
     if not pd.api.types.is_datetime64_any_dtype(df['Date']):
         df['Date'] = pd.to_datetime(df['Date'])
@@ -879,11 +1001,66 @@ def main():
     if actual_max_date.tz is not None:
         actual_max_date = actual_max_date.tz_localize(None)
     
-    print(f"\nDataset Date Range: {actual_min_date.date()} to {actual_max_date.date()}")
+    print(f"  Date range: {actual_min_date.date()} to {actual_max_date.date()}")
+    
+    # Show overall label distribution
+    label_counts = np.bincount(df['signal_label'].values, minlength=3)
+    print(f"\nOverall Label Distribution:")
+    print(f"  SELL (0): {label_counts[0]} ({label_counts[0]/len(df):.1%})")
+    print(f"  NO_TRADE (1): {label_counts[1]} ({label_counts[1]/len(df):.1%})")
+    print(f"  BUY (2): {label_counts[2]} ({label_counts[2]/len(df):.1%})")
 
-    # Su dung TAT CA features co san
-    available = all_features
-    print(f"\nUsing ALL {len(available)} features from dataset")
+    # Su dung TAT CA features co san, nhung loai bo cac features khong mong muon
+    available = list(all_feature_cols)
+    
+    # Loai bo cac features khong mong muon
+    exclude_features = [
+        "Unnamed: 0",  # Index column tu CSV
+        "Volume",  # Absolute volume, da co volume_ratio va volume_sma20
+        "sma50", "sma200"  # Absolute SMA values, da co price_vs_sma50 va price_vs_sma200
+    ]
+    
+    # Loai bo cac features trong exclude list
+    available = [f for f in available if f not in exclude_features]
+    
+    # Sap xep features de de doc hon
+    available_sorted = sorted(available)
+    
+    # Phan loai features
+    # One-hot: chi cac features stock_NVDA, stock_AMD, etc. (khong bao gom stock_vs_sox)
+    onehot_features = [f for f in available_sorted if f.startswith('stock_') and f not in ['stock_vs_sox']]
+    # Sector: cac features lien quan den sox/sector (bao gom stock_vs_sox)
+    sector_features = [f for f in available_sorted if ('sox' in f.lower() or 'sector' in f.lower() or f == 'stock_vs_sox')]
+    # Technical: tat ca cac features con lai
+    technical_features = [f for f in available_sorted if f not in onehot_features and f not in sector_features]
+    
+    print(f"\n{'='*60}")
+    print(f"FEATURE SUMMARY:")
+    print(f"{'='*60}")
+    print(f"Total features from dataset: {len(all_feature_cols)}")
+    print(f"Excluded features ({len(exclude_features)}): {exclude_features}")
+    print(f"Final number of features: {len(available_sorted)}")
+    print(f"\nFeature breakdown:")
+    print(f"  - Technical indicators: {len(technical_features)}")
+    print(f"  - Sector features: {len(sector_features)}")
+    print(f"  - One-hot encoding: {len(onehot_features)}")
+    print(f"  - Total: {len(technical_features) + len(sector_features) + len(onehot_features)}")
+    print(f"\n{'='*60}")
+    print(f"DETAILED FEATURE LIST:")
+    print(f"{'='*60}")
+    print(f"\nTechnical Indicators ({len(technical_features)}):")
+    for i, feat in enumerate(technical_features, 1):
+        print(f"  {i:2d}. {feat}")
+    print(f"\nSector Features ({len(sector_features)}):")
+    for i, feat in enumerate(sector_features, 1):
+        print(f"  {i:2d}. {feat}")
+    print(f"\nOne-Hot Encoding ({len(onehot_features)}):")
+    for i, feat in enumerate(onehot_features, 1):
+        print(f"  {i:2d}. {feat}")
+    print(f"{'='*60}")
+    
+    # Cap nhat available thanh sorted list
+    available = available_sorted
     
     if len(available) == 0:
         raise RuntimeError("No features available in dataset. Aborting v7.1 run.")
