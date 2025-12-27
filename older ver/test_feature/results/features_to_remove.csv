@@ -1,0 +1,12 @@
+feature,vif,in_high_correlation,priority
+macd_hist,142971416741920.5,False,high
+macd_signal,25957346555449.543,True,high
+macd,999.0,True,high
+rsi14,15.878426975031,True,high
+bb_percent,12.428822416889943,True,high
+obv,9.703787182867774,False,medium
+atr,7.633318123914052,False,medium
+daily_return,7.401138506135429,False,medium
+oc_spread_pct,6.928085860575704,False,medium
+price_change,6.838362088347232,False,medium
+oc_spread,6.698284757480645,False,medium

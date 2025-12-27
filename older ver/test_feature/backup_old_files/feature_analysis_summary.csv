@@ -1,0 +1,2 @@
+total_features,high_correlations,high_vif_features,suggested_reduced_set,feature_groups
+27,20,21,12,"{'trend': 2, 'momentum': 5, 'volatility': 6, 'volume': 3, 'structure': 4, 'position': 3}"

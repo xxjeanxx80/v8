@@ -31,33 +31,58 @@ import argparse
 import numpy as np
 import pandas as pd
 
-# allow importing v4 utilities (robustly)
-v4_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'nvda_lstm_v4_multistock'))
-if v4_path not in sys.path:
-    sys.path.insert(0, v4_path)
-
-try:
-    from nvda_lstm_multistock_complete import NVDA_MultiStock_Complete, LSTMRegressor, RegressionDataset  # type: ignore[import]
-except Exception:
-    import importlib.util
-    spec_path = os.path.join(v4_path, 'nvda_lstm_multistock_complete.py')
-    if os.path.exists(spec_path):
-        spec = importlib.util.spec_from_file_location('nvda_lstm_multistock_complete', spec_path)
-        if spec is None or spec.loader is None:
-            raise ImportError(f'Unable to load specification for {spec_path}')
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        NVDA_MultiStock_Complete = getattr(mod, 'NVDA_MultiStock_Complete')
-        LSTMRegressor = getattr(mod, 'LSTMRegressor')
-        RegressionDataset = getattr(mod, 'RegressionDataset')
-    else:
-        raise ImportError(f'Module file not found: {spec_path}')
-
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error
+
+
+# ==================== Dataset Classes ====================
+class RegressionDataset(Dataset):
+    """
+    Dataset cho regression task
+    """
+    def __init__(self, X, y):
+        self.X = torch.FloatTensor(X)
+        self.y = torch.FloatTensor(y)
+    
+    def __len__(self):
+        return len(self.X)
+    
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+
+# ==================== Model Classes ====================
+class LSTMRegressor(nn.Module):
+    """
+    LSTM Model cho regression
+    """
+    def __init__(self, input_size, hidden_size=64, num_layers=3, dropout=0.3):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        self.lstm = nn.LSTM(
+            input_size, hidden_size, num_layers,
+            batch_first=True, dropout=dropout if num_layers > 1 else 0.0
+        )
+        self.dropout = nn.Dropout(dropout)
+        self.fc1 = nn.Linear(hidden_size, 32)
+        self.fc2 = nn.Linear(32, 1)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        device = x.device
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size, device=device)
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size, device=device)
+        out, _ = self.lstm(x, (h0, c0))
+        out = out[:, -1, :]
+        out = self.dropout(out)
+        out = self.relu(self.fc1(out))
+        out = self.fc2(out)
+        return out
 
 
 # ==================== V7 Configuration ====================
@@ -88,7 +113,7 @@ def create_sequences(X, y, sequence_length):
     return np.array(X_seq), np.array(y_seq)
 
 
-def split_data_by_years_v7_1(df, feature_cols, predictor,
+def split_data_by_years_v7_1(df, feature_cols, sequence_length,
                              pretrain_start='2015-01-01', pretrain_end='2020-12-31',
                              finetune_start='2021-01-01', finetune_end='2024-12-31',
                              val_start='2023-01-01', val_end='2024-12-31',
@@ -99,6 +124,9 @@ def split_data_by_years_v7_1(df, feature_cols, predictor,
     - Fine-tune: 2021-2024 (4 nam) - all stocks, TACH BIET voi test
     - Validation: 2023-2024 (2 nam) - NVDA only (cho threshold optimization)
     - Test: 2025 (1 nam) - NVDA only, OUT-OF-SAMPLE thuc su
+    
+    Args:
+        sequence_length: Do dai sequence cho LSTM
     """
     # Convert Date column to datetime if needed
     if not pd.api.types.is_datetime64_any_dtype(df['Date']):
@@ -135,10 +163,26 @@ def split_data_by_years_v7_1(df, feature_cols, predictor,
             return None, None, None
         X = df_period[feature_cols].values
         y_reg = df_period['future_return'].values.reshape(-1, 1)
-        y_cls = df_period['signal_label'].values
+        
+        # Create signal_label neu chua co (cho truong hop analyze script khong tao signal_label)
+        if 'signal_label' not in df_period.columns:
+            # Tao signal_label tu future_return quantiles (same logic as training)
+            future_returns = df_period['future_return'].values
+            future_returns_clean = future_returns[~np.isnan(future_returns)]
+            if len(future_returns_clean) > 0:
+                q_low = np.quantile(future_returns_clean, 0.30)
+                q_high = np.quantile(future_returns_clean, 0.70)
+                y_cls = np.where(future_returns >= q_high, 2, 
+                                np.where(future_returns <= q_low, 0, 1))
+            else:
+                # Fallback: all NO_TRADE
+                y_cls = np.ones(len(df_period), dtype=np.int64)
+        else:
+            y_cls = df_period['signal_label'].values
+        
         # Create sequences
-        X_seq, y_reg_seq = create_sequences(X, y_reg, predictor.sequence_length)
-        _, y_cls_seq = create_sequences(X, y_cls, predictor.sequence_length)
+        X_seq, y_reg_seq = create_sequences(X, y_reg, sequence_length)
+        _, y_cls_seq = create_sequences(X, y_cls, sequence_length)
         return X_seq, y_reg_seq, y_cls_seq
     
     pretrain_data = prepare_period(df_pretrain)
@@ -230,7 +274,7 @@ def pretrain_model(input_size, train_loader, val_loader, epochs=200, lr=5e-4, de
             print(f"  Early stopping at epoch {ep+1}")
             break
 
-    model.load_state_dict(torch.load('best_pretrain.pth', map_location=device))
+    model.load_state_dict(torch.load('best_pretrain.pth', map_location=device, weights_only=True))
     return model, train_losses, val_losses
 
 
@@ -294,7 +338,7 @@ def finetune_model(model, train_loader, val_loader, epochs=100, lr=1e-4, device=
             print(f"  Early stopping at epoch {ep+1}")
             break
 
-    model.load_state_dict(torch.load('best_finetune.pth', map_location=device))
+    model.load_state_dict(torch.load('best_finetune.pth', map_location=device, weights_only=True))
     return model, train_losses, val_losses
 
 
@@ -692,17 +736,43 @@ def optimize_threshold_validation(model, X_val, y_val, scaler_X, scaler_y, devic
             avg_sell_loss = np.mean(-sell_returns[sell_returns >= 0]) if np.any(sell_returns >= 0) else 0
             sell_expectancy = sell_wr * avg_sell_win - (1 - sell_wr) * abs(avg_sell_loss) if len(sell_returns) > 0 else 0
             
-            # V7.2: Siet chat thuat toan toi uu - Chi chap nhan neu ca buy_expectancy VA sell_expectancy > 0
-            # Neu mot trong hai co ky vong am (<= 0), bo qua bo tham so nay
-            if buy_expectancy <= 0 or sell_expectancy <= 0:
-                continue  # Bo qua bo tham so nay
+            # V7.2: Siet chat thuat toan toi uu
+            # Chap nhan neu: ca hai phe co expectancy > 0 HOAC it nhat 1 phe co signals va expectancy > 0
+            # Bo qua neu: ca hai phe deu co expectancy <= 0 (du co signals hay khong)
+            has_buy_signals = len(buy_returns) > 0
+            has_sell_signals = len(sell_returns) > 0
             
-            buy_coverage = len(buy_returns) / len(signals)
-            sell_coverage = len(sell_returns) / len(signals)
+            # Tinh toan coverage truoc
+            buy_coverage = len(buy_returns) / len(signals) if len(signals) > 0 else 0
+            sell_coverage = len(sell_returns) / len(signals) if len(signals) > 0 else 0
             total_coverage = buy_coverage + sell_coverage
             
+            # Kiem tra dieu kien strict optimization
+            strict_pass = False
+            if has_buy_signals and has_sell_signals:
+                # Ca hai phe co signals: yeu cau ca hai deu > 0
+                strict_pass = (buy_expectancy > 0 and sell_expectancy > 0)
+            elif has_buy_signals:
+                # Chi co buy signals: yeu cau buy_expectancy > 0
+                strict_pass = (buy_expectancy > 0)
+            elif has_sell_signals:
+                # Chi co sell signals: yeu cau sell_expectancy > 0
+                strict_pass = (sell_expectancy > 0)
+            else:
+                # Khong co signals nao
+                strict_pass = False
+            
+            # Neu khong thoa man dieu kien strict, bo qua
+            if not strict_pass:
+                continue
+            
             # Custom score: expectancy * coverage (uu tien ca hai)
-            score = (buy_expectancy * buy_coverage + sell_expectancy * sell_coverage) * total_coverage
+            if has_buy_signals and has_sell_signals:
+                score = (buy_expectancy * buy_coverage + sell_expectancy * sell_coverage) * total_coverage
+            elif has_buy_signals:
+                score = buy_expectancy * buy_coverage * total_coverage
+            else:  # has_sell_signals
+                score = sell_expectancy * sell_coverage * total_coverage
             
             if score > best_score:
                 best_score = score
@@ -713,6 +783,76 @@ def optimize_threshold_validation(model, X_val, y_val, scaler_X, scaler_y, devic
                     buy_coverage=buy_coverage, sell_coverage=sell_coverage,
                     coverage=total_coverage, score=score
                 )
+    
+    # Neu khong tim thay threshold thoa man dieu kien strict, thu fallback
+    if best is None:
+        print("  Canh bao: Khong tim thay threshold thoa man dieu kien strict.")
+        print("  Dang thu fallback: tim threshold tot nhat (co the khong thoa man strict)...")
+        best = None
+        best_score = -float('inf')
+        
+        for bp in buy_percentiles:
+            for sp in sell_percentiles:
+                # Calculate thresholds
+                buy_thr = np.percentile(y_pred_centered[y_pred_centered > 0], bp) if np.any(y_pred_centered > 0) else np.percentile(np.abs(y_pred_centered), bp)
+                sell_thr = -np.percentile(-y_pred_centered[y_pred_centered < 0], 100 - sp) if np.any(y_pred_centered < 0) else -np.percentile(np.abs(y_pred_centered), 100 - sp)
+                
+                # Fallback
+                if np.isnan(buy_thr) or buy_thr <= 0:
+                    buy_thr = np.percentile(np.abs(y_pred_centered), bp)
+                if np.isnan(sell_thr) or sell_thr >= 0:
+                    sell_thr = -np.percentile(np.abs(y_pred_centered), 100 - sp)
+                
+                # Generate signals
+                signals = np.where(y_pred_centered > buy_thr, 2,
+                                 np.where(y_pred_centered < sell_thr, 0, 1))
+                
+                buy_returns = y_true[signals == 2]
+                sell_returns = y_true[signals == 0]
+                
+                if len(buy_returns) == 0 and len(sell_returns) == 0:
+                    continue
+                
+                # Calculate metrics
+                buy_wr = np.mean(buy_returns > 0) if len(buy_returns) > 0 else 0
+                sell_wr = np.mean(sell_returns < 0) if len(sell_returns) > 0 else 0
+                
+                avg_buy_win = np.mean(buy_returns[buy_returns > 0]) if np.any(buy_returns > 0) else 0
+                avg_buy_loss = np.mean(buy_returns[buy_returns <= 0]) if np.any(buy_returns <= 0) else 0
+                buy_expectancy = buy_wr * avg_buy_win - (1 - buy_wr) * abs(avg_buy_loss) if len(buy_returns) > 0 else 0
+                
+                avg_sell_win = np.mean(-sell_returns[sell_returns < 0]) if np.any(sell_returns < 0) else 0
+                avg_sell_loss = np.mean(-sell_returns[sell_returns >= 0]) if np.any(sell_returns >= 0) else 0
+                sell_expectancy = sell_wr * avg_sell_win - (1 - sell_wr) * abs(avg_sell_loss) if len(sell_returns) > 0 else 0
+                
+                buy_coverage = len(buy_returns) / len(signals) if len(signals) > 0 else 0
+                sell_coverage = len(sell_returns) / len(signals) if len(signals) > 0 else 0
+                total_coverage = buy_coverage + sell_coverage
+                
+                # Fallback score: uu tien expectancy cao nhat (co the am)
+                has_buy_signals = len(buy_returns) > 0
+                has_sell_signals = len(sell_returns) > 0
+                
+                if has_buy_signals and has_sell_signals:
+                    score = (buy_expectancy * buy_coverage + sell_expectancy * sell_coverage) * total_coverage
+                elif has_buy_signals:
+                    score = buy_expectancy * buy_coverage * total_coverage
+                else:  # has_sell_signals
+                    score = sell_expectancy * sell_coverage * total_coverage
+                
+                if score > best_score:
+                    best_score = score
+                    best = dict(
+                        bp=bp, sp=sp, buy_thr=buy_thr, sell_thr=sell_thr,
+                        buy_wr=buy_wr, sell_wr=sell_wr,
+                        buy_expectancy=buy_expectancy, sell_expectancy=sell_expectancy,
+                        buy_coverage=buy_coverage, sell_coverage=sell_coverage,
+                        coverage=total_coverage, score=score
+                    )
+        
+        if best is not None:
+            print(f"  Fallback: Tim thay threshold (co the khong thoa man strict):")
+            print(f"    Buy expectancy: {best['buy_expectancy']:.4f}, Sell expectancy: {best['sell_expectancy']:.4f}")
     
     return best
 
@@ -904,10 +1044,7 @@ def main():
     print(f"  - Sửa Drawdown: Tính dựa trên Equity Curve (Vốn)")
     print(f"  - Siết chặt optimization: Chỉ chấp nhận nếu cả buy_expectancy VÀ sell_expectancy > 0")
 
-    # Init predictor (chi de lay sequence_length va horizon)
-    predictor = NVDA_MultiStock_Complete(sequence_length=args.seq_len, horizon=args.horizon)
-    
-    # ==================== Load data va them features TRUC TIEP trong v7.1 ====================
+    # ==================== Load data va them features TRUC TIEP trong v7.2 ====================
     import glob
     stocks = ['NVDA', 'AMD', 'MU', 'INTC', 'QCOM']
     all_dfs = []
@@ -952,24 +1089,24 @@ def main():
         df["future_return"] = (adj.shift(-args.horizon) / adj) - 1.0
         
         # ==================== Them 5 Sector Features ====================
-        # Simulate SOX index data
-        np.random.seed(42)
-        df['sox_return'] = np.random.normal(0.001, 0.02, len(df))
+        # (DA BO ĐOAN NAY DI DE TRANH NHIEU)
+        # np.random.seed(42)
+        # df['sox_return'] = np.random.normal(0.001, 0.02, len(df))
         
         # Calculate rolling beta to SOX
-        window = 20
-        df['stock_vs_sox'] = df['daily_return'] - df['sox_return']
+        # window = 20
+        # df['stock_vs_sox'] = df['daily_return'] - df['sox_return']
         
         # Rolling correlation
-        df['rolling_corr_sox'] = df['daily_return'].rolling(window).corr(df['sox_return'])
+        # df['rolling_corr_sox'] = df['daily_return'].rolling(window).corr(df['sox_return'])
         
         # Rolling beta
-        cov_stock_sox = df['daily_return'].rolling(window).cov(df['sox_return'])
-        var_sox = df['sox_return'].rolling(window).var()
-        df['beta_to_sox'] = cov_stock_sox / var_sox
+        # cov_stock_sox = df['daily_return'].rolling(window).cov(df['sox_return'])
+        # var_sox = df['sox_return'].rolling(window).var()
+        # df['beta_to_sox'] = cov_stock_sox / var_sox
         
         # Sector momentum indicator
-        df['sector_momentum'] = df['sox_return'].rolling(5).mean()
+        # df['sector_momentum'] = df['sox_return'].rolling(5).mean()
         
         # Calculate per-stock quantiles for labels
         r = df["future_return"].values
@@ -1131,13 +1268,13 @@ def main():
         print(f"\nWARNING: Dataset khong co data tu 2015. Dieu chinh pretrain period:")
         print(f"  Pretrain: {pretrain_start} to {pretrain_end}")
     
-    # Split data theo V7.1 date ranges (no leakage)
+    # Split data theo V7.2 date ranges (no leakage)
     data_splits = split_data_by_years_v7_1(
-        df, available, predictor,
+        df, available, args.seq_len,
         pretrain_start=pretrain_start,
         pretrain_end=pretrain_end,
         finetune_start='2021-01-01',
-        finetune_end='2024-12-31',  # V7.1: 2024 thay vi 2025
+        finetune_end='2024-12-31',  # V7.2: 2024 thay vi 2025
         val_start='2023-01-01',
         val_end='2024-12-31',
         test_start='2025-01-01',
@@ -1272,7 +1409,14 @@ def main():
     )
     
     if best_thresholds is None:
-        raise RuntimeError("No valid thresholds found on validation set.")
+        raise RuntimeError(
+            "Khong tim thay threshold hop le tren validation set.\n"
+            "Nguyen nhan co the:\n"
+            "1. Model du doan khong tot tren validation set\n"
+            "2. Khong co signals nao duoc tao ra voi bat ky threshold nao\n"
+            "3. Tat ca threshold deu co expectancy <= 0\n"
+            "Vui long kiem tra lai model hoac thu dieu chinh tham so."
+        )
     
     print(f"  Best Thresholds:")
     print(f"    Buy percentile: {best_thresholds['bp']} -> threshold {best_thresholds['buy_thr']:.4f}")

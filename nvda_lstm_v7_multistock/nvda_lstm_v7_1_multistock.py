@@ -59,8 +59,8 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 # ==================== V7 Configuration ====================
 # Asymmetric scoring cho NVDA (uu tien BUY)
-BUY_WEIGHT = 0.7
-SELL_WEIGHT = 0.3
+BUY_WEIGHT = 0.8
+SELL_WEIGHT = 0.2
 
 # False signal thresholds
 MIN_WIN_RATE = 0.50

@@ -1,0 +1,9 @@
+Metric,V5,V6,V7,Format
+Buy Win Rate,1.0,1.0,,%
+Sell Win Rate,0.5384615384615384,0.75,,%
+Combined Win Rate,0.7692307692307692,0.875,,%
+Buy Expectancy,0.0,0.0,,abs
+Sell Expectancy,0.0,0.0,,abs
+Coverage,0.0,0.0,,%
+RMSE,0.08948222274283517,0.0662416915587054,,abs
+MAE,0.07074903696775436,0.05436825007200241,,abs

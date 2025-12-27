@@ -1,0 +1,2 @@
+features,count,rationale
+"['macd_bullish', 'bb_bandwidth', 'volume_ratio', 'volume_sma20', 'daily_return', 'price_change', 'return_3d', 'return_5d', 'return_10d', 'return_20d', 'hl_spread_pct', 'oc_spread', 'oc_spread_pct', 'bb_squeeze', 'rsi_overbought', 'rsi_oversold', 'sox_beta', 'sox_correlation']",18,Best feature set tu quick test (18 features); Giam multicollinearity bang cach loai bo features co VIF cao va redundant; Dua tren ket qua VIF ablation va correlation reduction tests
