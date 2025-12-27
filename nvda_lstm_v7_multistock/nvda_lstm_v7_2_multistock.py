@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-NVDA LSTM v8 - Final Version (Thua huong toan bo V7.1)
+NVDA LSTM v7.2 - No-Leakage Strategy with Fixed Logic
 
-V8 khac voi V7.1:
-- Pretrain: 2015-2020 (5 nam) - giu nguyen nhu V7.1
-- Fine-tune: 2021-2023 (3 nam) thay vi 2021-2024 (4 nam) - ngan hon
-- Validation: 2022-2023-NVDA (2 nam) thay vi 2023-2024 - som hon
-- Test: 2024-2025 (2 nam) thay vi chi 2025 (1 nam) - dai hon, bao gom ca 2024
+V7.2 khac voi V7.1:
+1. Loai bo cac feature co gia tri tuyet doi: bb_lower, bb_middle, bb_upper, obv (tranh lam hong Scaler)
+2. Them Stoploss gia lap: STOP_LOSS_PCT = -7%, force exit khi daily_return < -7%
+3. Sua tinh Drawdown: Tinh dua tren Equity Curve (Von) thay vi cumulative_returns
+4. Siet chat thuat toan toi uu: Chi chap nhan bo tham so neu ca buy_expectancy VA sell_expectancy > 0
 
 Muc dich:
-- More out-of-sample data: Test period 2024-2025 khong overlap voi fine-tune
-- Extended test period: 2 nam thay vi 1 nam de danh gia tot hon
-- Earlier validation: 2022-2023 de optimize threshold som hon
+- Giam overfit: Tranh data leakage (V7 co the leak vi pretrain 2015-2025 bao gom test period 2025)
+- Tang generalization: Pretrain tren period khac hoan toan voi test period
+- Out-of-sample thuc su: Test period 2025 khong xuat hien trong pretrain/finetune
+- Sua loi logic nghiem trong: Feature filtering, Drawdown calculation, Optimization constraints
 
-Thua huong toan bo tu V7.1:
+Cai tien tu V7.1:
 - V7.1: Expectancy proxy scoring (thay vi chi win rate)
 - V7.2: Center y_pred truoc threshold (threshold on dinh hon)
 - V7.3: Asymmetric scoring cho NVDA (uu tien BUY: 70/30)
+- V7.2 Fix: Loai bo absolute features, stoploss simulation, drawdown fix, strict optimization
 - Overfitting detection: Walk-forward analysis
 - False signal filtering: Loai bo signals co win rate thap, return am, expectancy < 0
 - Trade/no-trade logic: Hybrid (confidence threshold + min expectancy)
@@ -35,7 +37,7 @@ if v4_path not in sys.path:
     sys.path.insert(0, v4_path)
 
 try:
-    from nvda_lstm_multistock_complete import NVDA_MultiStock_Complete, LSTMRegressor, RegressionDataset
+    from nvda_lstm_multistock_complete import NVDA_MultiStock_Complete, LSTMRegressor, RegressionDataset  # type: ignore[import]
 except Exception:
     import importlib.util
     spec_path = os.path.join(v4_path, 'nvda_lstm_multistock_complete.py')
@@ -73,6 +75,9 @@ CONFIDENCE_THRESHOLD_PCT = 60  # Top 40% confidence
 # Overfitting check
 WALK_FORWARD_WINDOWS = 3
 
+# V7.2: Stoploss gia lap
+STOP_LOSS_PCT = -0.07  # -7% stoploss
+
 
 def create_sequences(X, y, sequence_length):
     """Tao sequences cho LSTM"""
@@ -83,17 +88,17 @@ def create_sequences(X, y, sequence_length):
     return np.array(X_seq), np.array(y_seq)
 
 
-def split_data_by_years_v8(df, feature_cols, predictor,
+def split_data_by_years_v7_1(df, feature_cols, predictor,
                              pretrain_start='2015-01-01', pretrain_end='2020-12-31',
-                             finetune_start='2021-01-01', finetune_end='2023-12-31',
-                             val_start='2022-01-01', val_end='2023-12-31',
-                             test_start='2024-01-01', test_end='2025-12-31'):
+                             finetune_start='2021-01-01', finetune_end='2024-12-31',
+                             val_start='2023-01-01', val_end='2024-12-31',
+                             test_start='2025-01-01', test_end='2025-12-31'):
     """
-    V8: Split data KHONG co leakage (Final Version)
+    V7.1: Split data KHONG co leakage
     - Pretrain: 2015-2020 (5 nam) - all stocks, TACH BIET voi test
-    - Fine-tune: 2021-2023 (3 nam) - all stocks, TACH BIET voi test
-    - Validation: 2022-2023 (2 nam) - NVDA only (cho threshold optimization)
-    - Test: 2024-2025 (2 nam) - NVDA only, OUT-OF-SAMPLE thuc su
+    - Fine-tune: 2021-2024 (4 nam) - all stocks, TACH BIET voi test
+    - Validation: 2023-2024 (2 nam) - NVDA only (cho threshold optimization)
+    - Test: 2025 (1 nam) - NVDA only, OUT-OF-SAMPLE thuc su
     """
     # Convert Date column to datetime if needed
     if not pd.api.types.is_datetime64_any_dtype(df['Date']):
@@ -117,12 +122,12 @@ def split_data_by_years_v8(df, feature_cols, predictor,
     df_test = df[test_mask].copy()
     
     print(f"\n{'='*60}")
-    print("V8 Data Split by Years (No Leakage - Final Version):")
+    print("V7.2 Data Split by Years (No Leakage):")
     print(f"{'='*60}")
     print(f"  Pretrain (2015-2020): {len(df_pretrain)} rows (all stocks)")
-    print(f"  Fine-tune (2021-2023): {len(df_finetune)} rows (all stocks)")
-    print(f"  Validation (2022-2023): {len(df_val)} rows (NVDA only)")
-    print(f"  Test (2024-2025): {len(df_test)} rows (NVDA only) - OUT-OF-SAMPLE")
+    print(f"  Fine-tune (2021-2024): {len(df_finetune)} rows (all stocks)")
+    print(f"  Validation (2023-2024): {len(df_val)} rows (NVDA only)")
+    print(f"  Test (2025): {len(df_test)} rows (NVDA only) - OUT-OF-SAMPLE")
     
     # Prepare features and targets cho tung period
     def prepare_period(df_period):
@@ -354,9 +359,13 @@ def detect_false_signals(signals, y_true, min_wr=MIN_WIN_RATE, min_expectancy=MI
     }
 
 
-def calculate_profitability_metrics(signals, y_true):
+def calculate_profitability_metrics(signals, y_true, stop_loss_pct=STOP_LOSS_PCT):
     """
-    Tinh cac metrics ve lai/lo thuc te
+    V7.2: Tinh cac metrics ve lai/lo thuc te voi stoploss va drawdown fix
+    
+    Thay doi:
+    - Them stoploss gia lap: Neu daily_return < stop_loss_pct, gan bang stop_loss_pct va force exit
+    - Sua tinh Drawdown: Tinh dua tren Equity Curve (Von) thay vi cumulative_returns
     """
     # Cumulative returns
     cumulative_returns = []
@@ -378,6 +387,11 @@ def calculate_profitability_metrics(signals, y_true):
             daily_return = -y_true[i]
         else:
             daily_return = 0
+        
+        # V7.2: Stoploss gia lap - neu daily_return < stop_loss_pct, gan bang stop_loss_pct va force exit
+        if daily_return < stop_loss_pct:
+            daily_return = stop_loss_pct
+            position = 0  # Force exit
         
         total_return += daily_return
         cumulative_returns.append(total_return)
@@ -403,10 +417,16 @@ def calculate_profitability_metrics(signals, y_true):
     else:
         sharpe_ratio = 0
     
-    # Max drawdown
-    if len(returns_array) > 0:
-        peak = np.maximum.accumulate(returns_array)
-        drawdown = (returns_array - peak) / (peak + 1e-6)
+    # V7.2: Max drawdown - Tinh dua tren Equity Curve (Von) thay vi cumulative_returns
+    # Von ban dau = 1.0
+    # equity_curve = 1.0 + cumulative_returns
+    # peak = maximum.accumulate(equity_curve)
+    # drawdown = (equity_curve - peak) / peak
+    if len(cumulative_returns) > 0:
+        initial_capital = 1.0
+        equity_curve = initial_capital + np.array(cumulative_returns)
+        peak = np.maximum.accumulate(equity_curve)
+        drawdown = (equity_curve - peak) / peak
         max_drawdown = np.min(drawdown)
     else:
         max_drawdown = 0
@@ -560,6 +580,12 @@ def evaluate_thresholds_v7(y_true, y_pred, buy_percentiles=None, sell_percentile
             sell_coverage = len(final_sell_returns) / len(filtered_signals)
             
             # Recalculate expectancy sau khi filter
+            # V7.2: Khoi tao buy_expectancy va sell_expectancy
+            buy_expectancy = 0
+            sell_expectancy = 0
+            avg_buy_return = 0
+            avg_sell_return = 0
+            
             if len(final_buy_returns) > 0:
                 avg_buy_win = np.mean(final_buy_returns[final_buy_returns > 0]) if np.any(final_buy_returns > 0) else 0
                 avg_buy_loss = np.mean(final_buy_returns[final_buy_returns <= 0]) if np.any(final_buy_returns <= 0) else 0
@@ -571,6 +597,11 @@ def evaluate_thresholds_v7(y_true, y_pred, buy_percentiles=None, sell_percentile
                 avg_sell_loss = np.mean(-final_sell_returns[final_sell_returns >= 0]) if np.any(final_sell_returns >= 0) else 0
                 sell_expectancy = sell_wr * avg_sell_win - (1 - sell_wr) * abs(avg_sell_loss)
                 avg_sell_return = np.mean(final_sell_returns)
+            
+            # V7.2: Siet chat thuat toan toi uu - Chi chap nhan neu ca buy_expectancy VA sell_expectancy > 0
+            # Neu mot trong hai co ky vong am (<= 0), bo qua bo tham so nay
+            if buy_expectancy <= 0 or sell_expectancy <= 0:
+                continue  # Bo qua bo tham so nay
             
             # V7.3: Asymmetric scoring (uu tien BUY)
             score = (
@@ -603,7 +634,7 @@ def evaluate_thresholds_v7(y_true, y_pred, buy_percentiles=None, sell_percentile
 
 def optimize_threshold_validation(model, X_val, y_val, scaler_X, scaler_y, device='cpu'):
     """
-    Optimize threshold chi tren validation period (2022-2023) - V8
+    Optimize threshold chi tren validation period (2023-2024)
     Custom optimization: maximize expectancy * coverage
     """
     # Predict tren validation set
@@ -661,6 +692,11 @@ def optimize_threshold_validation(model, X_val, y_val, scaler_X, scaler_y, devic
             avg_sell_loss = np.mean(-sell_returns[sell_returns >= 0]) if np.any(sell_returns >= 0) else 0
             sell_expectancy = sell_wr * avg_sell_win - (1 - sell_wr) * abs(avg_sell_loss) if len(sell_returns) > 0 else 0
             
+            # V7.2: Siet chat thuat toan toi uu - Chi chap nhan neu ca buy_expectancy VA sell_expectancy > 0
+            # Neu mot trong hai co ky vong am (<= 0), bo qua bo tham so nay
+            if buy_expectancy <= 0 or sell_expectancy <= 0:
+                continue  # Bo qua bo tham so nay
+            
             buy_coverage = len(buy_returns) / len(signals)
             sell_coverage = len(sell_returns) / len(signals)
             total_coverage = buy_coverage + sell_coverage
@@ -681,10 +717,9 @@ def optimize_threshold_validation(model, X_val, y_val, scaler_X, scaler_y, devic
     return best
 
 
-def test_on_2024_2025(model, X_test, y_test, dates_test, scaler_X, scaler_y, best_thresholds, device='cpu'):
+def test_on_2025(model, X_test, y_test, scaler_X, scaler_y, best_thresholds, device='cpu'):
     """
-    Test model tren 2024-2025 voi thresholds da optimize - V8
-    Tra ve metrics cho ca 2 nam (tong hop va rieng tung nam)
+    Test model tren 2025 voi thresholds da optimize
     """
     # Predict
     model.eval()
@@ -735,59 +770,10 @@ def test_on_2024_2025(model, X_test, y_test, dates_test, scaler_X, scaler_y, bes
     rmse = np.sqrt(mean_squared_error(y_true, preds))
     mae = mean_absolute_error(y_true, preds)
     
-    # V8: Tinh metrics rieng cho 2024 va 2025
-    if dates_test is not None:
-        dates_test = pd.to_datetime(dates_test)
-        if dates_test.tz is not None:
-            dates_test = dates_test.dt.tz_localize(None)
-        
-        mask_2024 = (dates_test >= pd.to_datetime('2024-01-01')) & (dates_test <= pd.to_datetime('2024-12-31'))
-        mask_2025 = (dates_test >= pd.to_datetime('2025-01-01')) & (dates_test <= pd.to_datetime('2025-12-31'))
-        
-        # Metrics cho 2024
-        signals_2024 = signals[mask_2024]
-        y_true_2024 = y_true[mask_2024]
-        buy_returns_2024 = y_true_2024[signals_2024 == 2]
-        sell_returns_2024 = y_true_2024[signals_2024 == 0]
-        
-        buy_wr_2024 = np.mean(buy_returns_2024 > 0) if len(buy_returns_2024) > 0 else 0
-        sell_wr_2024 = np.mean(sell_returns_2024 < 0) if len(sell_returns_2024) > 0 else 0
-        combined_wr_2024 = (buy_wr_2024 + sell_wr_2024) / 2 if (len(buy_returns_2024) > 0 or len(sell_returns_2024) > 0) else 0
-        
-        # Metrics cho 2025
-        signals_2025 = signals[mask_2025]
-        y_true_2025 = y_true[mask_2025]
-        buy_returns_2025 = y_true_2025[signals_2025 == 2]
-        sell_returns_2025 = y_true_2025[signals_2025 == 0]
-        
-        buy_wr_2025 = np.mean(buy_returns_2025 > 0) if len(buy_returns_2025) > 0 else 0
-        sell_wr_2025 = np.mean(sell_returns_2025 < 0) if len(sell_returns_2025) > 0 else 0
-        combined_wr_2025 = (buy_wr_2025 + sell_wr_2025) / 2 if (len(buy_returns_2025) > 0 or len(sell_returns_2025) > 0) else 0
-        
-        metrics_by_year = {
-            '2024': {
-                'buy_wr': buy_wr_2024,
-                'sell_wr': sell_wr_2024,
-                'combined_wr': combined_wr_2024,
-                'buy_coverage': len(buy_returns_2024) / len(signals_2024) if len(signals_2024) > 0 else 0,
-                'sell_coverage': len(sell_returns_2024) / len(signals_2024) if len(signals_2024) > 0 else 0
-            },
-            '2025': {
-                'buy_wr': buy_wr_2025,
-                'sell_wr': sell_wr_2025,
-                'combined_wr': combined_wr_2025,
-                'buy_coverage': len(buy_returns_2025) / len(signals_2025) if len(signals_2025) > 0 else 0,
-                'sell_coverage': len(sell_returns_2025) / len(signals_2025) if len(signals_2025) > 0 else 0
-            }
-        }
-    else:
-        metrics_by_year = None
-    
     return {
         'signals': signals,
         'y_true': y_true,
         'y_pred': preds,
-        'dates': dates_test,
         'metrics': {
             'buy_wr': buy_wr,
             'sell_wr': sell_wr,
@@ -802,8 +788,7 @@ def test_on_2024_2025(model, X_test, y_test, dates_test, scaler_X, scaler_y, bes
             'rmse': rmse,
             'mae': mae
         },
-        'profitability': profit_metrics,
-        'metrics_by_year': metrics_by_year
+        'profitability': profit_metrics
     }
 
 
@@ -889,7 +874,7 @@ def check_overfitting_walk_forward(X_train, y_train, X_test, y_test, model, scal
 
 
 def main():
-    parser = argparse.ArgumentParser(description='NVDA LSTM v8 - Final Version (Thua huong V7.1)')
+    parser = argparse.ArgumentParser(description='NVDA LSTM v7.2 - No-Leakage Strategy with Fixed Logic')
     workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     default_data_dir = os.path.join(workspace_root, 'data')
     parser.add_argument('--data_dir', '-d', default=default_data_dir)
@@ -905,19 +890,146 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
     print(f"\n{'='*60}")
-    print(f"NVDA LSTM v8 - Final Version (Thua huong V7.1)")
+    print(f"NVDA LSTM v7.2 - No-Leakage Strategy with Fixed Logic")
     print(f"{'='*60}")
-    print(f"\nV8 Strategy (No Data Leakage - Final Version):")
+    print(f"\nV7.2 Strategy (No Data Leakage + Fixed Logic):")
     print(f"  Step 1: Pretrain trên 2015-2020 (5 năm) - TÁCH BIỆT với test")
-    print(f"  Step 2: Fine-tune trên 2021-2023 (3 năm) - Freeze Encoder, TÁCH BIỆT với test")
+    print(f"  Step 2: Fine-tune trên 2021-2024 (4 năm) - Freeze Encoder, TÁCH BIỆT với test")
     print(f"  Step 3: Freeze Model")
-    print(f"  Step 4: Optimize Threshold trên 2022-2023 (Validation)")
-    print(f"  Step 5: Test trên 2024-2025 (Test Period) - OUT-OF-SAMPLE thực sự (2 năm)")
+    print(f"  Step 4: Optimize Threshold trên 2023-2024 (Validation)")
+    print(f"  Step 5: Test trên 2025 (Test Period) - OUT-OF-SAMPLE thực sự")
+    print(f"\nV7.2 Fixes:")
+    print(f"  - Loại bỏ absolute features: bb_lower, bb_middle, bb_upper, obv")
+    print(f"  - Thêm Stoploss giả lập: {STOP_LOSS_PCT*100:.0f}%")
+    print(f"  - Sửa Drawdown: Tính dựa trên Equity Curve (Vốn)")
+    print(f"  - Siết chặt optimization: Chỉ chấp nhận nếu cả buy_expectancy VÀ sell_expectancy > 0")
 
-    # Init predictor
+    # Init predictor (chi de lay sequence_length va horizon)
     predictor = NVDA_MultiStock_Complete(sequence_length=args.seq_len, horizon=args.horizon)
-    df, all_features = predictor.load_multi_stock_data(args.data_dir)
-
+    
+    # ==================== Load data va them features TRUC TIEP trong v7.1 ====================
+    import glob
+    stocks = ['NVDA', 'AMD', 'MU', 'INTC', 'QCOM']
+    all_dfs = []
+    all_feature_cols = set()
+    stock_quantiles = {}
+    
+    print(f"Loading data from {len(stocks)} stocks...")
+    
+    # Tim file trong data/Feature/ truoc, neu khong co thi tim trong data/
+    feature_dir = os.path.join(args.data_dir, 'Feature')
+    search_dirs = [feature_dir, args.data_dir] if os.path.exists(feature_dir) else [args.data_dir]
+    
+    for stock in stocks:
+        csv_file = None
+        
+        # Tim file voi pattern {stock}_dss_features_*.csv
+        for search_dir in search_dirs:
+            pattern = os.path.join(search_dir, f"{stock}_dss_features_*.csv")
+            matches = glob.glob(pattern)
+            if matches:
+                # Lay file moi nhat neu co nhieu file
+                csv_file = max(matches, key=os.path.getmtime)
+                break
+        
+        if csv_file is None or not os.path.exists(csv_file):
+            print(f"Warning: {stock}_dss_features_*.csv not found in {search_dirs}, skipping {stock}")
+            continue
+        
+        # Load CSV file
+        df = pd.read_csv(csv_file)
+        
+        if "Date" in df.columns:
+            df["Date"] = pd.to_datetime(df["Date"])
+            df = df.sort_values("Date").reset_index(drop=True)
+        
+        # ==================== Them 5 One-Hot Encoding Features ====================
+        for s in stocks:
+            df[f'stock_{s}'] = 1 if s == stock else 0
+        
+        # Create future return target
+        adj = df["Adj Close"].astype(float)
+        df["future_return"] = (adj.shift(-args.horizon) / adj) - 1.0
+        
+        # ==================== Them 5 Sector Features ====================
+        # Simulate SOX index data
+        np.random.seed(42)
+        df['sox_return'] = np.random.normal(0.001, 0.02, len(df))
+        
+        # Calculate rolling beta to SOX
+        window = 20
+        df['stock_vs_sox'] = df['daily_return'] - df['sox_return']
+        
+        # Rolling correlation
+        df['rolling_corr_sox'] = df['daily_return'].rolling(window).corr(df['sox_return'])
+        
+        # Rolling beta
+        cov_stock_sox = df['daily_return'].rolling(window).cov(df['sox_return'])
+        var_sox = df['sox_return'].rolling(window).var()
+        df['beta_to_sox'] = cov_stock_sox / var_sox
+        
+        # Sector momentum indicator
+        df['sector_momentum'] = df['sox_return'].rolling(5).mean()
+        
+        # Calculate per-stock quantiles for labels
+        r = df["future_return"].values
+        r_clean = r[~np.isnan(r)]
+        
+        q_low = np.quantile(r_clean, 0.30)
+        q_high = np.quantile(r_clean, 0.70)
+        
+        # Store quantiles for this stock
+        stock_quantiles[stock] = {'low': q_low, 'high': q_high}
+        
+        print(f"{stock} quantiles - Low: {q_low:.4f}, High: {q_high:.4f}")
+        
+        # Create labels using per-stock quantiles
+        y_cls = np.where(df["future_return"] >= q_high, 2, 
+                        np.where(df["future_return"] <= q_low, 0, 1))
+        df["signal_label"] = y_cls.astype(np.int64)
+        
+        # Drop NaN rows
+        df = df.dropna().reset_index(drop=True)
+        
+        # Select ONLY relative features (NO absolute prices!)
+        exclude_cols = [
+            "Date", "Index", "Adj Close", "Close", "Open", "High", "Low",
+            "daily_return", "price_change", "future_return", "signal_label"
+        ]
+        
+        # Check which columns exist and select features
+        feature_cols = [c for c in df.columns if c not in exclude_cols]
+        
+        # Ensure no absolute price features (chi loai bo cac columns chinh xac la price columns)
+        absolute_price_cols = ['close', 'open', 'high', 'low']
+        feature_cols = [c for c in feature_cols if c.lower() not in absolute_price_cols]
+        
+        print(f"  OK {stock}: {len(df)} rows, {len(feature_cols)} features (from {os.path.basename(csv_file)})")
+        all_dfs.append(df)
+        all_feature_cols.update(feature_cols)
+    
+    if not all_dfs:
+        raise ValueError("No stock data files found!")
+    
+    # Ensure all DataFrames have the same columns
+    for i, df in enumerate(all_dfs):
+        for col in all_feature_cols:
+            if col not in df.columns:
+                df[col] = 0  # Fill missing features with 0
+    
+    # Combine all data
+    df = pd.concat(all_dfs, ignore_index=True)
+    
+    # Convert to float32 (except labels)
+    label_cols = ['signal_label']
+    numeric_cols = [col for col in df.select_dtypes(include=[np.number]).columns 
+                   if col not in label_cols]
+    df[numeric_cols] = df[numeric_cols].astype(np.float32)
+    
+    print(f"\nCombined dataset:")
+    print(f"  Total rows: {len(df)}")
+    print(f"  Features: {len(all_feature_cols)}")
+    
     # Kiem tra date range thuc te cua dataset
     if not pd.api.types.is_datetime64_any_dtype(df['Date']):
         df['Date'] = pd.to_datetime(df['Date'])
@@ -931,14 +1043,71 @@ def main():
     if actual_max_date.tz is not None:
         actual_max_date = actual_max_date.tz_localize(None)
     
-    print(f"\nDataset Date Range: {actual_min_date.date()} to {actual_max_date.date()}")
+    print(f"  Date range: {actual_min_date.date()} to {actual_max_date.date()}")
+    
+    # Show overall label distribution
+    label_counts = np.bincount(df['signal_label'].values, minlength=3)
+    print(f"\nOverall Label Distribution:")
+    print(f"  SELL (0): {label_counts[0]} ({label_counts[0]/len(df):.1%})")
+    print(f"  NO_TRADE (1): {label_counts[1]} ({label_counts[1]/len(df):.1%})")
+    print(f"  BUY (2): {label_counts[2]} ({label_counts[2]/len(df):.1%})")
 
-    # Su dung TAT CA features co san
-    available = all_features
-    print(f"\nUsing ALL {len(available)} features from dataset")
+    # Su dung TAT CA features co san, nhung loai bo cac features khong mong muon
+    available = list(all_feature_cols)
+    
+    # V7.2: Loai bo cac features khong mong muon (bao gom cac features co gia tri tuyet doi)
+    exclude_features = [
+        "Unnamed: 0",  # Index column tu CSV
+        "Volume",  # Absolute volume, da co volume_ratio va volume_sma20
+        "sma50", "sma200",  # Absolute SMA values, da co price_vs_sma50 va price_vs_sma200
+        "bb_lower", "bb_middle", "bb_upper",  # Absolute Bollinger Bands values
+        "obv"  # Absolute On-Balance Volume
+    ]
+    
+    # Loai bo cac features trong exclude list
+    available = [f for f in available if f not in exclude_features]
+    
+    # Sap xep features de de doc hon
+    available_sorted = sorted(available)
+    
+    # Phan loai features
+    # One-hot: chi cac features stock_NVDA, stock_AMD, etc. (khong bao gom stock_vs_sox)
+    onehot_features = [f for f in available_sorted if f.startswith('stock_') and f not in ['stock_vs_sox']]
+    # Sector: cac features lien quan den sox/sector (bao gom stock_vs_sox)
+    sector_features = [f for f in available_sorted if ('sox' in f.lower() or 'sector' in f.lower() or f == 'stock_vs_sox')]
+    # Technical: tat ca cac features con lai
+    technical_features = [f for f in available_sorted if f not in onehot_features and f not in sector_features]
+    
+    print(f"\n{'='*60}")
+    print(f"FEATURE SUMMARY:")
+    print(f"{'='*60}")
+    print(f"Total features from dataset: {len(all_feature_cols)}")
+    print(f"Excluded features ({len(exclude_features)}): {exclude_features}")
+    print(f"Final number of features: {len(available_sorted)}")
+    print(f"\nFeature breakdown:")
+    print(f"  - Technical indicators: {len(technical_features)}")
+    print(f"  - Sector features: {len(sector_features)}")
+    print(f"  - One-hot encoding: {len(onehot_features)}")
+    print(f"  - Total: {len(technical_features) + len(sector_features) + len(onehot_features)}")
+    print(f"\n{'='*60}")
+    print(f"DETAILED FEATURE LIST:")
+    print(f"{'='*60}")
+    print(f"\nTechnical Indicators ({len(technical_features)}):")
+    for i, feat in enumerate(technical_features, 1):
+        print(f"  {i:2d}. {feat}")
+    print(f"\nSector Features ({len(sector_features)}):")
+    for i, feat in enumerate(sector_features, 1):
+        print(f"  {i:2d}. {feat}")
+    print(f"\nOne-Hot Encoding ({len(onehot_features)}):")
+    for i, feat in enumerate(onehot_features, 1):
+        print(f"  {i:2d}. {feat}")
+    print(f"{'='*60}")
+    
+    # Cap nhat available thanh sorted list
+    available = available_sorted
     
     if len(available) == 0:
-        raise RuntimeError("No features available in dataset. Aborting v8 run.")
+        raise RuntimeError("No features available in dataset. Aborting v7.2 run.")
 
     # Dieu chinh date ranges neu can thiet
     # Neu dataset khong co data tu 2015-2020, dieu chinh pretrain period
@@ -962,30 +1131,17 @@ def main():
         print(f"\nWARNING: Dataset khong co data tu 2015. Dieu chinh pretrain period:")
         print(f"  Pretrain: {pretrain_start} to {pretrain_end}")
     
-    # V8: Luu dates cho test period truoc khi split (de co sequence_length offset)
-    if not pd.api.types.is_datetime64_any_dtype(df['Date']):
-        df['Date'] = pd.to_datetime(df['Date'])
-    nvda_mask = df['stock_NVDA'] == 1
-    test_mask = (df['Date'] >= '2024-01-01') & (df['Date'] <= '2025-12-31') & nvda_mask
-    df_test_dates = df[test_mask].copy()
-    df_test_dates = df_test_dates.sort_values('Date').reset_index(drop=True)
-    # Normalize timezone
-    if df_test_dates['Date'].dt.tz is not None:
-        df_test_dates['Date'] = df_test_dates['Date'].dt.tz_localize(None)
-    # Dates cho test sequences (bo qua sequence_length dau tien)
-    dates_test = df_test_dates['Date'].values[predictor.sequence_length:]
-    
-    # Split data theo V8 date ranges (no leakage - Final Version)
-    data_splits = split_data_by_years_v8(
+    # Split data theo V7.1 date ranges (no leakage)
+    data_splits = split_data_by_years_v7_1(
         df, available, predictor,
         pretrain_start=pretrain_start,
         pretrain_end=pretrain_end,
         finetune_start='2021-01-01',
-        finetune_end='2023-12-31',  # V8: 2023 thay vi 2024
-        val_start='2022-01-01',      # V8: 2022 thay vi 2023
-        val_end='2023-12-31',        # V8: 2023 thay vi 2024
-        test_start='2024-01-01',     # V8: 2024 thay vi 2025
-        test_end='2025-12-31'        # V8: bao gom ca 2024 va 2025
+        finetune_end='2024-12-31',  # V7.1: 2024 thay vi 2025
+        val_start='2023-01-01',
+        val_end='2024-12-31',
+        test_start='2025-01-01',
+        test_end='2025-12-31'
     )
 
     # Check data availability va xu ly fallback neu can
@@ -993,8 +1149,8 @@ def main():
     if data_splits['pretrain'][0] is None or len(data_splits['pretrain'][0]) == 0:
         # Neu khong co pretrain data, su dung finetune data cho pretrain (fallback)
         print(f"\nWARNING: Khong co pretrain data trong khoang {pretrain_start} to {pretrain_end}")
-        print(f"  Su dung finetune data (2021-2023) cho ca pretrain va finetune")
-        print(f"  Strategy: Pretrain = 70% of 2021-2023, Fine-tune = 30% of 2021-2023, Test = 2024-2025")
+        print(f"  Su dung finetune data (2021-2024) cho ca pretrain va finetune")
+        print(f"  Strategy: Pretrain = 70% of 2021-2024, Fine-tune = 30% of 2021-2024, Test = 2025")
         
         # Su dung finetune data cho pretrain
         X_finetune, y_finetune_reg, _ = data_splits['finetune']
@@ -1028,9 +1184,9 @@ def main():
     # ==================== Step 1: Pretrain ====================
     print(f"\n{'='*60}")
     if use_fallback:
-        print("Step 1: Pretrain trên 70% of 2021-2023 (Fallback - No 2015-2020 data) - V8")
+        print("Step 1: Pretrain trên 70% of 2021-2024 (Fallback - No 2015-2020 data) - V7.2")
     else:
-        print("Step 1: Pretrain trên 2015-2020 (5 năm) - V8 No Leakage")
+        print("Step 1: Pretrain trên 2015-2020 (5 năm) - V7.2 No Leakage")
     print(f"{'='*60}")
     X_pretrain, y_pretrain_reg, _ = data_splits['pretrain']
     
@@ -1058,9 +1214,9 @@ def main():
     )
     print(f"  Pretrain completed. Best Val Loss: {min(pretrain_val_losses):.6f}")
 
-    # ==================== Step 2: Fine-tune trên 3 năm (freeze encoder) ====================
+    # ==================== Step 2: Fine-tune trên 4 năm (freeze encoder) ====================
     print(f"\n{'='*60}")
-    print("Step 2: Fine-tune trên 2021-2023 (3 năm) - Freeze Encoder (V8 No Leakage)")
+    print("Step 2: Fine-tune trên 2021-2024 (4 năm) - Freeze Encoder (V7.2 No Leakage)")
     print(f"{'='*60}")
     X_finetune, y_finetune_reg, _ = data_splits['finetune']
     
@@ -1104,9 +1260,9 @@ def main():
     model_frozen = freeze_model(model_finetuned)
     print(f"  Model frozen (all parameters require_grad=False)")
 
-    # ==================== Step 4: Optimize Threshold trên Validation (2022-2023) ====================
+    # ==================== Step 4: Optimize Threshold trên Validation (2023-2024) ====================
     print(f"\n{'='*60}")
-    print("Step 4: Optimize Threshold trên 2022-2023 (Validation) - V8")
+    print("Step 4: Optimize Threshold trên 2023-2024 (Validation)")
     print(f"{'='*60}")
     X_val, y_val_reg, _ = data_splits['validation']
     print(f"  Validation sequences: {X_val.shape[0]}")
@@ -1128,16 +1284,15 @@ def main():
     print(f"    Coverage: {best_thresholds['coverage']:.1%}")
     print(f"    Score: {best_thresholds['score']:.4f}")
 
-    # ==================== Step 5: Test trên 2024-2025 ====================
+    # ==================== Step 5: Test trên 2025 ====================
     print(f"\n{'='*60}")
-    print("Step 5: Test trên 2024-2025 (Test Period) - V8")
+    print("Step 5: Test trên 2025 (Test Period)")
     print(f"{'='*60}")
     X_test, y_test_reg, _ = data_splits['test']
     print(f"  Test sequences: {X_test.shape[0]}")
     
-    # V8: Truyen dates_test vao test function
-    test_results = test_on_2024_2025(
-        model_frozen, X_test, y_test_reg, dates_test, scaler_X_pretrain, scaler_y_pretrain,
+    test_results = test_on_2025(
+        model_frozen, X_test, y_test_reg, scaler_X_pretrain, scaler_y_pretrain,
         best_thresholds, device
     )
     
@@ -1157,22 +1312,6 @@ def main():
     print(f"    Sharpe Ratio: {test_results['profitability']['sharpe_ratio']:.2f}")
     print(f"    Max Drawdown: {test_results['profitability']['max_drawdown']:.2%}")
     print(f"    Is Profitable: {test_results['profitability']['is_profitable']}")
-    
-    # V8: Hien thi metrics rieng cho 2024 va 2025
-    if test_results['metrics_by_year'] is not None:
-        print(f"\n  Metrics by Year (V8):")
-        print(f"    2024:")
-        print(f"      Buy Win Rate: {test_results['metrics_by_year']['2024']['buy_wr']:.1%}")
-        print(f"      Sell Win Rate: {test_results['metrics_by_year']['2024']['sell_wr']:.1%}")
-        print(f"      Combined Win Rate: {test_results['metrics_by_year']['2024']['combined_wr']:.1%}")
-        print(f"      Buy Coverage: {test_results['metrics_by_year']['2024']['buy_coverage']:.1%}")
-        print(f"      Sell Coverage: {test_results['metrics_by_year']['2024']['sell_coverage']:.1%}")
-        print(f"    2025:")
-        print(f"      Buy Win Rate: {test_results['metrics_by_year']['2025']['buy_wr']:.1%}")
-        print(f"      Sell Win Rate: {test_results['metrics_by_year']['2025']['sell_wr']:.1%}")
-        print(f"      Combined Win Rate: {test_results['metrics_by_year']['2025']['combined_wr']:.1%}")
-        print(f"      Buy Coverage: {test_results['metrics_by_year']['2025']['buy_coverage']:.1%}")
-        print(f"      Sell Coverage: {test_results['metrics_by_year']['2025']['sell_coverage']:.1%}")
 
     # Save artifacts
     artifact = {
@@ -1190,7 +1329,6 @@ def main():
         'validation_thresholds': best_thresholds,
         'test_metrics': test_results['metrics'],
         'test_profitability': test_results['profitability'],
-        'test_by_year': test_results['metrics_by_year'],  # V8: Metrics rieng cho 2024 va 2025
         'config': {
             'pretrain_epochs': args.pretrain_epochs,
             'finetune_epochs': args.finetune_epochs,
@@ -1198,9 +1336,13 @@ def main():
             'finetune_lr': args.finetune_lr
         }
     }
-    torch.save(artifact, 'nvda_lstm_v8_artifact.pth')
+    
+    # Luu artifact vao cung thu muc voi script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    artifact_path = os.path.join(script_dir, 'nvda_lstm_v7_2_artifact.pth')
+    torch.save(artifact, artifact_path)
     print(f"\n{'='*60}")
-    print("V8 Artifact saved: nvda_lstm_v8_artifact.pth")
+    print(f"V7.2 Artifact saved: {artifact_path}")
     print(f"{'='*60}")
 
 

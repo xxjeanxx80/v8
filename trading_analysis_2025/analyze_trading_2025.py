@@ -35,19 +35,49 @@ except Exception:
     else:
         raise ImportError(f'Module file not found: {spec_path}')
 
-# Import v7.1 split function
-try:
-    from nvda_lstm_v7_1_multistock import split_data_by_years_v7_1  # type: ignore[import]
-except Exception:
-    import importlib.util
-    v7_1_path = os.path.join(v7_path, 'nvda_lstm_v7_1_multistock.py')
-    if os.path.exists(v7_1_path):
-        spec = importlib.util.spec_from_file_location('nvda_lstm_v7_1_multistock', v7_1_path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        split_data_by_years_v7_1 = getattr(mod, 'split_data_by_years_v7_1')
-    else:
-        raise ImportError(f'Module file not found: {v7_1_path}')
+def load_split_function(version='v7.1', v7_module_path=None):
+    """
+    Load split function tu module v7.1 hoac v7.2
+    
+    Args:
+        version: 'v7.1' hoac 'v7.2'
+        v7_module_path: Path to v7 module directory (auto-detect if None)
+    
+    Returns:
+        split_data_by_years function
+    """
+    if v7_module_path is None:
+        # Auto-detect v7_path from workspace root
+        workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        v7_module_path = os.path.join(workspace_root, 'nvda_lstm_v7_multistock')
+    
+    # Chuyen doi version format: v7.2 -> v7_2 (de match voi ten file thuc te)
+    version_file = version.replace('.', '_')
+    
+    module_name = f'nvda_lstm_{version_file}_multistock'
+    file_name = f'nvda_lstm_{version_file}_multistock.py'
+    
+    # Luu y: Ca v7.1 va v7.2 deu su dung function split_data_by_years_v7_1
+    # (v7.2 ke thua logic split tu v7.1)
+    function_name = 'split_data_by_years_v7_1'
+    
+    try:
+        # Thu import truc tiep truoc
+        mod = __import__(module_name, fromlist=[function_name])
+        return getattr(mod, function_name)
+    except Exception:
+        # Neu khong duoc, thu import tu file
+        import importlib.util
+        module_path = os.path.join(v7_module_path, file_name)
+        if os.path.exists(module_path):
+            spec = importlib.util.spec_from_file_location(module_name, module_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f'Unable to load specification for {module_path}')
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return getattr(mod, function_name)
+        else:
+            raise ImportError(f'Module file not found: {module_path}')
 
 from sklearn.preprocessing import MinMaxScaler
 import matplotlib.pyplot as plt
@@ -110,11 +140,11 @@ def load_test_data_2025(data_dir, predictor, feature_cols, sequence_length=30):
 
 
 def predict_and_analyze(model, X_test, y_test, dates, scaler_X, scaler_y, 
-                        buy_thr, sell_thr, device='cpu'):
+                        buy_thr, sell_thr, device='cpu', version='v7.1'):
     """
     Predict va phan tich ket qua
     
-    CRITICAL: V7.1 signal generation logic (must match training/testing):
+    CRITICAL: Signal generation logic (must match training/testing):
     1. Predict future returns → y_pred (raw predictions)
     2. Center predictions: y_pred_centered = y_pred - mean(y_pred)
     3. Generate signals using CENTERED predictions:
@@ -122,7 +152,10 @@ def predict_and_analyze(model, X_test, y_test, dates, scaler_X, scaler_y,
        - SELL if y_pred_centered < sell_threshold
        - NO_TRADE otherwise
     
-    This ensures consistency with v7.1 artifact results.
+    This ensures consistency with artifact results.
+    
+    Args:
+        version: 'v7.1' hoac 'v7.2' - chi de hien thi trong comments/logs
     """
     # Predict
     model.eval()
@@ -135,11 +168,11 @@ def predict_and_analyze(model, X_test, y_test, dates, scaler_X, scaler_y,
     preds = scaler_y.inverse_transform(preds_scaled.reshape(-1, 1)).flatten()
     y_true = y_test.flatten()
     
-    # V7.1 STEP 2: Center predictions (CRITICAL for threshold matching)
+    # STEP 2: Center predictions (CRITICAL for threshold matching)
     y_pred_mean = np.mean(preds)
     y_pred_centered = preds - y_pred_mean
     
-    # V7.1 STEP 3: Generate signals using CENTERED predictions (not raw!)
+    # STEP 3: Generate signals using CENTERED predictions (not raw!)
     # This matches the logic in test_on_2025() and optimize_threshold_validation()
     signals = np.where(y_pred_centered > buy_thr, 2,
                      np.where(y_pred_centered < sell_thr, 0, 1))
@@ -248,7 +281,7 @@ def print_trading_dates(results_df):
             print(f"{date_str:<12} {pred:>11.4f} {actual:>11.4f} {result:<10}")
 
 
-def create_visualizations(results_df, output_dir=None):
+def create_visualizations(results_df, output_dir=None, version='v7.1'):
     """
     Tao cac bieu do de xem tong quan ket qua trading
     
@@ -257,6 +290,9 @@ def create_visualizations(results_df, output_dir=None):
     2. Predicted vs Actual returns
     3. Signal distribution
     4. Win/Loss analysis
+    
+    Args:
+        version: 'v7.1' hoac 'v7.2' - de hien thi trong title
     """
     if output_dir is None:
         output_dir = os.path.dirname(__file__)
@@ -275,7 +311,7 @@ def create_visualizations(results_df, output_dir=None):
     
     # Tao figure voi 4 subplots
     fig = plt.figure(figsize=(16, 12))
-    fig.suptitle('NVDA LSTM v7.1 - Trading Analysis 2025', fontsize=16, fontweight='bold')
+    fig.suptitle(f'NVDA LSTM {version.upper()} - Trading Analysis 2025', fontsize=16, fontweight='bold')
     
     # ========== Subplot 1: Cumulative Returns voi Buy/Sell Signals ==========
     ax1 = plt.subplot(2, 2, 1)
@@ -416,7 +452,8 @@ def create_visualizations(results_df, output_dir=None):
     plt.tight_layout()
     
     # Luu bieu do
-    output_path = os.path.join(output_dir, 'trading_analysis_2025.png')
+    output_filename = f'trading_analysis_2025_{version}.png'
+    output_path = os.path.join(output_dir, output_filename)
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"  Bieu do da duoc luu vao: {output_path}")
     
@@ -427,21 +464,35 @@ def main():
     parser = argparse.ArgumentParser(description='Phan tich ket qua trading tren du lieu 2025')
     workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
-    default_artifact = os.path.join(workspace_root, 'nvda_lstm_v7_1_artifact.pth')
     default_data_dir = os.path.join(workspace_root, 'data')
     
-    parser.add_argument('--artifact', '-a', default=default_artifact,
-                       help='Path to artifact file (default: nvda_lstm_v7_1_artifact.pth)')
+    parser.add_argument('--version', '-v', choices=['v7.1', 'v7.2'], default='v7.1',
+                       help='Version to analyze (v7.1 or v7.2, default: v7.1)')
+    parser.add_argument('--artifact', '-a', default=None,
+                       help='Path to artifact file (default: auto-detect based on --version)')
     parser.add_argument('--data_dir', '-d', default=default_data_dir,
                        help='Path to data directory')
-    parser.add_argument('--output', '-o', default='trading_results_2025.csv',
-                       help='Output CSV file name')
+    parser.add_argument('--output', '-o', default=None,
+                       help='Output CSV file name (default: trading_results_2025_{version}.csv)')
     parser.add_argument('--device', default='cpu',
                        help='Device to use (cpu or cuda)')
     parser.add_argument('--no_plot', action='store_true',
                        help='Khong hien thi bieu do (chi luu file)')
     
     args = parser.parse_args()
+    
+    # Chuyen doi version format: v7.2 -> v7_2 (de match voi ten file artifact)
+    version_file = args.version.replace('.', '_')
+    
+    # Set default artifact path based on version
+    # Luu y: artifact file nam trong thu muc nvda_lstm_v7_multistock, khong phai workspace_root
+    if args.artifact is None:
+        v7_module_dir = os.path.join(workspace_root, 'nvda_lstm_v7_multistock')
+        args.artifact = os.path.join(v7_module_dir, f'nvda_lstm_{version_file}_artifact.pth')
+    
+    # Set default output file based on version
+    if args.output is None:
+        args.output = f'trading_results_2025_{args.version}.csv'
     
     device = args.device
     if device == 'cuda' and not torch.cuda.is_available():
@@ -450,7 +501,7 @@ def main():
     
     print(f"Using device: {device}")
     print(f"\n{'='*80}")
-    print("PHAN TICH KET QUA TRADING NAM 2025")
+    print(f"PHAN TICH KET QUA TRADING NAM 2025 - {args.version.upper()}")
     print(f"{'='*80}")
     
     # Load artifact
@@ -476,6 +527,11 @@ def main():
     print(f"  Buy Threshold: {buy_thr:.4f}")
     print(f"  Sell Threshold: {sell_thr:.4f}")
     
+    # Load split function based on version
+    print(f"\nDang load split function cho {args.version}...")
+    split_data_function = load_split_function(args.version, v7_module_path=v7_path)
+    print(f"  OK: Split function loaded")
+    
     # Load model
     print(f"\nDang load model...")
     sequence_length = 30
@@ -484,12 +540,12 @@ def main():
     model.eval()
     print("  OK: Model loaded")
     
-    # CRITICAL: Recreate scalers from PRETRAIN data (same as v7.1 training)
+    # CRITICAL: Recreate scalers from PRETRAIN data (same as training)
     # This ensures predictions are in the same scale as during training
     print(f"\nDang load du lieu de tao scalers (pretrain data)...")
     predictor = NVDA_MultiStock_Complete(sequence_length=sequence_length, horizon=5)
     
-    # Load full dataset to recreate data splits (same as v7.1)
+    # Load full dataset to recreate data splits (same as training)
     df_full, _ = predictor.load_multi_stock_data(args.data_dir)
     
     # Normalize timezone
@@ -497,8 +553,8 @@ def main():
         df_full['Date'] = pd.to_datetime(df_full['Date'])
     df_full['Date'] = pd.to_datetime(df_full['Date']).dt.tz_localize(None)
     
-    # Recreate data splits (same logic as v7.1)
-    # Determine pretrain period (same logic as v7.1)
+    # Recreate data splits (same logic as training)
+    # Determine pretrain period (same logic as training)
     actual_min_date = df_full['Date'].min()
     target_date_2015 = pd.to_datetime('2015-01-01')
     if actual_min_date > target_date_2015:
@@ -512,8 +568,8 @@ def main():
         pretrain_start = '2015-01-01'
         pretrain_end = '2020-12-31'
     
-    # Split data (same as v7.1)
-    data_splits = split_data_by_years_v7_1(
+    # Split data (same as training)
+    data_splits = split_data_function(
         df_full, features, predictor,
         pretrain_start=pretrain_start,
         pretrain_end=pretrain_end,
@@ -538,7 +594,7 @@ def main():
     X_pretrain_train = X_pretrain[:pretrain_split_idx]
     y_pretrain_train = y_pretrain_reg[:pretrain_split_idx]
     
-    # Create scalers and fit on pretrain TRAIN data (same as v7.1)
+    # Create scalers and fit on pretrain TRAIN data (same as training)
     scaler_X = MinMaxScaler()
     scaler_y = MinMaxScaler()
     
@@ -562,7 +618,7 @@ def main():
     print(f"\nDang predict va phan tich...")
     results_df = predict_and_analyze(
         model, X_test, y_test, dates, scaler_X, scaler_y,
-        buy_thr, sell_thr, device
+        buy_thr, sell_thr, device, version=args.version
     )
     print("  OK: Analysis completed")
     
@@ -586,7 +642,7 @@ def main():
     print(f"  Coverage: {coverage:.1%}")
     
     if test_metrics:
-        print(f"\nArtifact Test Metrics (from v7.1):")
+        print(f"\nArtifact Test Metrics (from {args.version}):")
         print(f"  Buy Win Rate: {test_metrics.get('buy_wr', 0):.1%}")
         print(f"  Sell Win Rate: {test_metrics.get('sell_wr', 0):.1%}")
         print(f"  Combined Win Rate: {test_metrics.get('combined_wr', 0):.1%}")
@@ -618,7 +674,7 @@ def main():
     print("Dang tao bieu do...")
     print(f"{'='*80}")
     try:
-        fig = create_visualizations(results_df, output_dir=os.path.dirname(__file__))
+        fig = create_visualizations(results_df, output_dir=os.path.dirname(__file__), version=args.version)
         print("  OK: Bieu do da duoc tao thanh cong")
         
         # Hien thi bieu do neu khong co flag --no_plot
